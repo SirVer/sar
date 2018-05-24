@@ -8,9 +8,7 @@ use std::io::{self, BufRead};
 use std::path;
 use walkdir::WalkDir;
 
-
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
-
 
 type Result<T> = ::std::result::Result<T, Error>;
 
@@ -46,7 +44,6 @@ fn handle_dir(path: impl AsRef<path::Path>) -> Result<()> {
     }
     Ok(())
 }
-
 
 fn main() {
     let home = env::home_dir().expect("HOME not set.");
