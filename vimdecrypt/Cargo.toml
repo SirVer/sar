@@ -1,13 +1,8 @@
 [package]
 authors = ["Holger Rapp <HolgerRapp@gmx.net>"]
-name = "sar"
+name = "vimdecrypt"
 version = "0.1.0"
 
 [dependencies]
+clap = "2.31.2"
 failure = "0.1.1"
-walkdir = "2.1.4"
-
-[dependencies.vimdecrypt]
-path = "vimdecrypt"
-
-[workspace]
