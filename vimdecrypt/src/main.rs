@@ -1,6 +1,6 @@
 extern crate clap;
-extern crate vimdecrypt;
 extern crate rpassword;
+extern crate vimdecrypt;
 
 use std::fs;
 
@@ -9,12 +9,14 @@ fn parse_arguments() -> clap::ArgMatches<'static> {
         .version("1.0")
         .author("Holger H. Rapp <SirVer@gmx.de>")
         .about("Decrypts files encrypted with Vim.")
-        .arg(clap::Arg::with_name("input")
-             .index(1)
-             .required(true)
-            .value_name("FILE")
-            .help("The file to decrypt.")
-            .takes_value(true))
+        .arg(
+            clap::Arg::with_name("input")
+                .index(1)
+                .required(true)
+                .value_name("FILE")
+                .help("The file to decrypt.")
+                .takes_value(true),
+        )
         .get_matches()
 }
 

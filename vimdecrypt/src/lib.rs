@@ -2,18 +2,22 @@
 
 #[macro_use]
 extern crate failure;
-extern crate sha2;
 extern crate blowfish;
 extern crate generic_array;
+extern crate sha2;
 
-use sha2::Digest;
 use blowfish::BlockCipher;
 use generic_array::GenericArray;
+use sha2::Digest;
 
 pub type Result<T> = ::std::result::Result<T, failure::Error>;
 
 #[derive(Debug)]
-enum CryptMethod { Zip, Blowfish, Blowfish2 }
+enum CryptMethod {
+    Zip,
+    Blowfish,
+    Blowfish2,
+}
 
 impl CryptMethod {
     fn from_header(data: &[u8]) -> Result<Self> {
@@ -29,7 +33,7 @@ impl CryptMethod {
 fn make_crc_table(seed: u32) -> Vec<u32> {
     fn calc_entry(mut v: u32, seed: u32) -> u32 {
         for _ in 0..8 {
-            v = (v>>1) ^ (if v & 1 != 0 { seed } else {0})
+            v = (v >> 1) ^ (if v & 1 != 0 { seed } else { 0 })
         }
         v
     }
@@ -40,12 +44,12 @@ fn make_crc_table(seed: u32) -> Vec<u32> {
 pub fn zip_decrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
     let crc_table = make_crc_table(0xedb88320);
 
-    let crc32 = |crc, byte: u8| crc_table[((crc^(byte as u32))&0xff) as usize] ^ (crc >> 8);
-    let mut keys = [0x12345678u32, 0x23456789u32, 0x34567890u32 ];
-    let update_keys = |keys: &mut[u32], byte| {
+    let crc32 = |crc, byte: u8| crc_table[((crc ^ (byte as u32)) & 0xff) as usize] ^ (crc >> 8);
+    let mut keys = [0x12345678u32, 0x23456789u32, 0x34567890u32];
+    let update_keys = |keys: &mut [u32], byte| {
         keys[0] = crc32(keys[0], byte);
-        keys[1] = ((keys[1] + (keys[0]&0xFF)) * 134775813 + 1)&0xFFFFFFFF;
-        keys[2] = crc32(keys[2], (keys[1]>>24) as u8);
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF;
+        keys[2] = crc32(keys[2], (keys[1] >> 24) as u8);
     };
 
     for c in password.chars() {
@@ -54,8 +58,8 @@ pub fn zip_decrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
 
     let mut plain_text = Vec::with_capacity(data.len());
     for b in data {
-        let xor = (keys[2] | 2)&0xFFFF;
-        let xor = ((xor * (xor^1))>>8) & 0xFF;
+        let xor = (keys[2] | 2) & 0xFFFF;
+        let xor = ((xor * (xor ^ 1)) >> 8) & 0xFF;
         let b = b ^ (xor as u8);
         plain_text.push(b);
         update_keys(&mut keys, b);
@@ -71,10 +75,8 @@ fn sha256(password: &[u8], salt: &[u8]) -> Vec<u8> {
 }
 
 pub fn to_hex_string(bytes: &[u8]) -> String {
-  let strs: Vec<String> = bytes.iter()
-                               .map(|b| format!("{:02x}", b))
-                               .collect();
-  strs.join("")
+    let strs: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    strs.join("")
 }
 
 fn hashpw(password: &str, salt: &[u8]) -> Vec<u8> {
@@ -108,12 +110,12 @@ pub fn blowfish_decrypt(all_data: &[u8], password: &str) -> Result<Vec<u8>> {
     let mut plaintext = Vec::new();
     for o in 0..data.len() {
         if o >= 64 && o % 8 == 0 {
-            xor = data[o-64..(o-64+8).min(data.len())].to_vec();
+            xor = data[o - 64..(o - 64 + 8).min(data.len())].to_vec();
             wordswap(&mut xor);
             bf.encrypt_block(&mut GenericArray::from_mut_slice(&mut xor));
             wordswap(&mut xor);
         }
-        plaintext.push(xor[(o%8) as usize] ^ data[o]);
+        plaintext.push(xor[(o % 8) as usize] ^ data[o]);
     }
     Ok(plaintext)
 }
@@ -134,9 +136,9 @@ pub fn blowfish2_decrypt(all_data: &[u8], password: &str) -> Result<Vec<u8>> {
             bf.encrypt_block(&mut GenericArray::from_mut_slice(&mut iv));
             wordswap(&mut iv);
             xor = iv;
-            iv = data[o..(o+8).min(data.len())].to_vec();
+            iv = data[o..(o + 8).min(data.len())].to_vec();
         }
-        plaintext.push(xor[(o%8) as usize] ^ data[o]);
+        plaintext.push(xor[(o % 8) as usize] ^ data[o]);
     }
     Ok(plaintext)
 }
