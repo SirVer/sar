@@ -1,4 +1,4 @@
-// Heavily lifted implementation from https://github.com/nlitsme/vimdecrypt.
+// Implementation heavily lifted from https://github.com/nlitsme/vimdecrypt.
 
 #[macro_use]
 extern crate failure;
