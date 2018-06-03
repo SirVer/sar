@@ -1,5 +1,6 @@
 extern crate clap;
 extern crate vimdecrypt;
+extern crate rpassword;
 
 use std::fs;
 
@@ -22,6 +23,8 @@ fn main() {
 
     let data = fs::read(args.value_of("input").unwrap()).expect("Could not read input file.");
 
-    let result = vimdecrypt::decrypt(&data, "blubberfish").expect("Decryption failed.");
+    let password = rpassword::prompt_password_stdout("Password: ").unwrap();
+
+    let result = vimdecrypt::decrypt(&data, &password).expect("Decryption failed.");
     println!("{}", String::from_utf8(result).unwrap());
 }

@@ -2,6 +2,13 @@
 
 #[macro_use]
 extern crate failure;
+extern crate sha2;
+extern crate blowfish;
+extern crate generic_array;
+
+use sha2::Digest;
+use blowfish::BlockCipher;
+use generic_array::GenericArray;
 
 pub type Result<T> = ::std::result::Result<T, failure::Error>;
 
@@ -56,12 +63,90 @@ pub fn zip_decrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
     Ok(plain_text)
 }
 
+fn sha256(password: &[u8], salt: &[u8]) -> Vec<u8> {
+    let mut hasher = sha2::Sha256::default();
+    hasher.input(password);
+    hasher.input(salt);
+    hasher.result().to_vec()
+}
+
+pub fn to_hex_string(bytes: &[u8]) -> String {
+  let strs: Vec<String> = bytes.iter()
+                               .map(|b| format!("{:02x}", b))
+                               .collect();
+  strs.join("")
+}
+
+fn hashpw(password: &str, salt: &[u8]) -> Vec<u8> {
+    let mut key = sha256(password.as_bytes(), salt);
+    for _ in 0..1000 {
+        key = sha256(to_hex_string(&key).as_bytes(), salt);
+    }
+    key.into()
+}
+
+fn wordswap(a: &mut [u8]) {
+    assert_eq!(a.len(), 8);
+    a.swap(0, 3);
+    a.swap(1, 2);
+    a.swap(4, 7);
+    a.swap(5, 6);
+}
+
+pub fn blowfish_decrypt(all_data: &[u8], password: &str) -> Result<Vec<u8>> {
+    let salt = &all_data[0..8];
+    let iv = &all_data[8..16];
+    let data = all_data[16..].to_vec();
+
+    let key = hashpw(password, salt);
+    let bf = blowfish::Blowfish::new_varkey(&key).unwrap();
+
+    let mut xor = iv.to_vec();
+    wordswap(&mut xor);
+    bf.encrypt_block(GenericArray::from_mut_slice(&mut xor));
+    wordswap(&mut xor);
+    let mut plaintext = Vec::new();
+    for o in 0..data.len() {
+        if o >= 64 && o % 8 == 0 {
+            xor = data[o-64..(o-64+8).min(data.len())].to_vec();
+            wordswap(&mut xor);
+            bf.encrypt_block(&mut GenericArray::from_mut_slice(&mut xor));
+            wordswap(&mut xor);
+        }
+        plaintext.push(xor[(o%8) as usize] ^ data[o]);
+    }
+    Ok(plaintext)
+}
+
+pub fn blowfish2_decrypt(all_data: &[u8], password: &str) -> Result<Vec<u8>> {
+    let salt = &all_data[0..8];
+    let mut iv = all_data[8..16].to_vec();
+    let data = all_data[16..].to_vec();
+
+    let key = hashpw(password, salt);
+    let bf = blowfish::Blowfish::new_varkey(&key).unwrap();
+
+    let mut xor = vec![8; 0];
+    let mut plaintext = Vec::new();
+    for o in 0..data.len() {
+        if o % 8 == 0 {
+            wordswap(&mut iv);
+            bf.encrypt_block(&mut GenericArray::from_mut_slice(&mut iv));
+            wordswap(&mut iv);
+            xor = iv;
+            iv = data[o..(o+8).min(data.len())].to_vec();
+        }
+        plaintext.push(xor[(o%8) as usize] ^ data[o]);
+    }
+    Ok(plaintext)
+}
 
 pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
     let method = CryptMethod::from_header(&data[0..12])?;
     let data = match method {
         CryptMethod::Zip => zip_decrypt(&data[12..], password)?,
-        _ => unimplemented!(),
+        CryptMethod::Blowfish => blowfish_decrypt(&data[12..], password)?,
+        CryptMethod::Blowfish2 => blowfish2_decrypt(&data[12..], password)?,
     };
     Ok(data)
 }
