@@ -5,9 +5,6 @@ version = "0.1.0"
 
 [dependencies]
 failure = "0.1.1"
+skim = "0.5.0"
+vimdecrypt = "0.1.1"
 walkdir = "2.1.4"
-
-[dependencies.vimdecrypt]
-path = "vimdecrypt"
-
-[workspace]
