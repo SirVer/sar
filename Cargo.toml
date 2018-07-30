@@ -1,10 +1,16 @@
+cargo-features = ["edition"]
+
 [package]
 authors = ["Holger Rapp <HolgerRapp@gmx.net>"]
+edition = "2018"
 name = "sar"
 version = "0.1.0"
 
 [dependencies]
+default-editor = "0.1.0"
+dirs = "1.0.2"
 failure = "0.1.1"
+itertools = "0.7.8"
 skim = "0.5.0"
 vimdecrypt = "0.1.1"
 walkdir = "2.1.4"
