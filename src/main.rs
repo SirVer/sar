@@ -201,8 +201,13 @@ fn main() -> Result<()> {
         });
 
         let secrets_dir = home.join("Documents/Secrets");
+        let tx_clone = tx.clone();
         scope.execute(move || {
-            handle_dir(secrets_dir, pass_ref, tx).unwrap();
+            handle_dir(secrets_dir, pass_ref, tx_clone).unwrap();
+        });
+
+        scope.execute(move || {
+            handle_dir("/", pass_ref, tx).unwrap();
         });
 
         // TODO(sirver): this feels weird. somehow this should be the main thread that continues.
