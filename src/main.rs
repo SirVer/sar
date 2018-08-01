@@ -1,6 +1,7 @@
 #![feature(rust_2018_preview)]
 #![warn(rust_2018_idioms)]
 
+
 use skim::{Skim, SkimOptions};
 use std::default::Default;
 use std::io::Cursor;
@@ -12,13 +13,27 @@ use walkdir::WalkDir;
 use std::fmt::{self, Display, Formatter};
 use itertools::Itertools;
 use std::process::Command;
+use structopt::StructOpt;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
+
+/// SirVer's archiver. Information retriever and writer.
+#[derive(StructOpt, Debug)]
+#[structopt(name = "sar")]
+struct CommandLineArguments {
+    /// Open the selected file. Default is to just dump it.
+    #[structopt(short = "o", long = "open")]
+    open: bool,
+}
 
 type Result<T> = ::std::result::Result<T, Error>;
 
 trait Item: Display {
-    fn handle_selection(&self);
+    /// Open the given Item for editing.
+    fn open(&self) -> Result<()>;
+
+    /// Display the given Items content.
+    fn cat(&self) -> Result<()>;
 }
 
 
@@ -36,8 +51,8 @@ impl Display for TextFileLineItem {
 }
 
 impl Item for TextFileLineItem {
-    fn handle_selection(&self) {
-        let editor = default_editor::get().unwrap();
+    fn open(&self) -> Result<()> {
+        let editor = default_editor::get()?;
         let mut it = editor.split(" ");
         let cmd = it.next().unwrap();
         let mut args: Vec<String> = it.map(|s| s.to_string()).collect();
@@ -45,7 +60,14 @@ impl Item for TextFileLineItem {
         args.push(format!("+{}", self.line_index + 1));
         // TODO(sirver): This kinda hardcodes vim
         // We ignore errors from vim.
-        let _ = Command::new(cmd).args(&args).spawn().unwrap().wait();
+        let _ = Command::new(cmd).args(&args).spawn()?.wait();
+        Ok(())
+    }
+
+    fn cat(&self) -> Result<()> {
+        let output = std::fs::read_to_string(&self.path)?;
+        println!("{}", output);
+        Ok(())
     }
 }
 
@@ -89,7 +111,9 @@ fn handle_dir(path: impl AsRef<Path>) -> Result<Vec<Box<dyn Item>>> {
     Ok(result)
 }
 
-fn main() {
+fn main() -> Result<()> {
+    let args = CommandLineArguments::from_args();
+
     let home = dirs::home_dir().expect("HOME not set.");
     let notes_dir = home.join("Dropbox/Tasks/notes");
     let mut results = Vec::new();
@@ -98,28 +122,32 @@ fn main() {
     let pdf_dir = home.join("Documents/Finanzen");
     results.append(&mut handle_dir(pdf_dir).unwrap());
 
-    let options: SkimOptions<'_> = SkimOptions::default().height("50%").multi(false);
+    let options: SkimOptions<'_> = SkimOptions::default().multi(false)
+        .expect("ctrl-e".to_string());
 
+    // TODO(sirver): This should stream eventually.
     let input = results.iter().map(|n| n.to_string()).join("\n");
+    let skim_output = match Skim::run_with(&options, Some(Box::new(Cursor::new(input)))) {
+        None => return Ok(()),
+        Some(s) => s,
+    };
 
-    let selected_items = Skim::run_with(&options, Some(Box::new(Cursor::new(input))))
-        .map(|out| out.selected_items)
-        .unwrap_or_else(|| Vec::new());
-
-    let first_selection = selected_items.first().unwrap().get_index();
-    let selected_item = &results[first_selection];
-    selected_item.handle_selection();
-
-
-    // //==================================================
-    // // second run
-    // let input = "11111\n22222\n333333333".to_string();
-
-    // let selected_items = Skim::run_with(&options, Some(Box::new(Cursor::new(input))))
-        // .map(|out| out.selected_items)
-        // .unwrap_or_else(|| Vec::new());
-
-    // for item in selected_items.iter() {
-        // print!("{}: {}{}", item.get_index(), item.get_output_text(), "\n");
-    // }
+    match skim_output.accept_key.as_ref().map(|s| s as &str) {
+        // TODO(sirver): Implement creating a new note.
+        Some("ctrl-e") => unimplemented!(),
+        Some("") | None => {
+            let first_selection = skim_output.selected_items.first().unwrap().get_index();
+            let selected_item = &results[first_selection];
+            if args.open {
+                selected_item.open()?;
+            } else {
+                selected_item.cat()?;
+            };
+        },
+        Some(unexpected_str) => {
+            // Skim should guarantee that this never happens.
+            unreachable!("Got unexpected: {:?}", unexpected_str);
+        },
+    };
+    Ok(())
 }
