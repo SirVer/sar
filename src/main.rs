@@ -6,12 +6,13 @@ use skim::{Skim, SkimOptions};
 use std::default::Default;
 use failure::Error;
 use std::fs;
-use std::io::{BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
 use std::path::{PathBuf, Path};
 use walkdir::WalkDir;
 use std::fmt::{self, Display, Formatter};
 use itertools::Itertools;
 use std::process::Command;
+use std::sync::mpsc;
 use structopt::StructOpt;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
@@ -31,7 +32,7 @@ struct CommandLineArguments {
 
 type Result<T> = ::std::result::Result<T, Error>;
 
-trait Item: Display {
+trait Item: Display + Send + Sync {
     /// Open the given Item for editing.
     fn open(&self) -> Result<()>;
 
@@ -90,27 +91,26 @@ impl Item for TextFileLineItem {
     }
 }
 
-fn report_txt_file_with_content(path: &Path, kind: TextFileLineItemKind, content: impl BufRead) -> Result<Vec<Box<dyn Item>>> {
-    let mut lines = Vec::new();
+fn report_txt_file_with_content(path: &Path, kind: TextFileLineItemKind, content: impl BufRead, tx: &mut mpsc::Sender<Box<dyn Item>>) -> Result<()> {
     for (line_index, line) in content.lines().enumerate() {
         // The file might be binary, i.e. not UTF-8 parsable.
         if let Ok(line) = line {
             if line.trim().is_empty() {
                 continue;
             }
-            lines.push(Box::new(TextFileLineItem {
+            tx.send(Box::new(TextFileLineItem {
                 path: path.to_path_buf(),
                 kind: kind.clone(),
                 line, line_index,
-            }) as Box<dyn Item>);
+            }) as Box<dyn Item>)?;
         }
     }
-    Ok(lines)
+    Ok(())
 }
 
-fn report_txt_file(path: &Path, password: &Option<String>) -> Result<Vec<Box<dyn Item>>> {
+fn report_txt_file(path: &Path, password: &Option<String>, tx: &mut mpsc::Sender<Box<dyn Item>>) -> Result<()> {
     match password {
-        None => report_txt_file_with_content(path, TextFileLineItemKind::Plain, BufReader::new(fs::File::open(path)?)),
+        None => report_txt_file_with_content(path, TextFileLineItemKind::Plain, BufReader::new(fs::File::open(path)?), tx),
         Some(pw) => {
             // Enough space for "VimCrypt~".
             let mut buf = vec![0u8; 9];
@@ -122,34 +122,64 @@ fn report_txt_file(path: &Path, password: &Option<String>) -> Result<Vec<Box<dyn
                 let mut file_contents = Vec::new();
                 file.read_to_end(&mut file_contents)?;
                 let content = vimdecrypt::decrypt(&file_contents, pw)?;
-                report_txt_file_with_content(path, TextFileLineItemKind::VimEncrypted(pw.to_string()), BufReader::new(Cursor::new(content)))
-            } else {
-                Ok(Vec::new())
+                report_txt_file_with_content(path, TextFileLineItemKind::VimEncrypted(pw.to_string()), BufReader::new(Cursor::new(content)), tx)?;
             }
+            Ok(())
         }
     }
 }
 
-// fn report_any_file(path: &Path) -> Result<Vec<Box<dyn Item>>> {
-    // println!("{}", path.display());
-    // Ok(())
-// }
-
-fn handle_dir(path: impl AsRef<Path>, password: &Option<String>) -> Result<Vec<Box<dyn Item>>> {
-    let mut result = Vec::new();
+fn handle_dir(path: impl AsRef<Path>, password: &Option<String>, mut tx: mpsc::Sender<Box<dyn Item>>) -> Result<()> {
     for entry in WalkDir::new(path.as_ref()) {
         if entry.is_err() {
             continue;
         }
         let entry = entry.unwrap();
-        let mut new_results = match entry.path().extension().map(|s| s.to_str().unwrap()) {
-            Some("md") | Some("txt") => report_txt_file(entry.path(), &password),
+        match entry.path().extension().map(|s| s.to_str().unwrap()) {
+            Some("md") | Some("txt") => report_txt_file(entry.path(), &password, &mut tx)?,
             _ => continue,
             // _ => report_any_file(entry.path()),
-        }?;
-        result.append(&mut new_results);
+        };
     }
-    Ok(result)
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SkimAdaptor {
+    rx: mpsc::Receiver<Box<dyn Item>>,
+    items_tx: mpsc::Sender<Box<dyn Item>>,
+    buffer: Vec<u8>,
+    nread: usize,
+}
+
+impl SkimAdaptor {
+    fn crank(&mut self) {
+        while let Ok(item) = self.rx.try_recv() {
+            self.buffer.append(&mut item.to_string().into_bytes());
+            self.buffer.extend(b"\n");
+            self.items_tx.send(item).unwrap();
+        };
+    }
+}
+
+impl std::io::Read for SkimAdaptor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.crank();
+        let num_bytes = buf.len().min(self.buffer.len() - self.nread);
+        buf.clone_from_slice(&self.buffer[self.nread..self.nread + num_bytes]);
+        Ok(num_bytes)
+    }
+}
+
+impl BufRead for SkimAdaptor {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.crank();
+        Ok(&self.buffer[self.nread..])
+    }
+
+    fn consume(&mut self, size: usize) {
+        self.nread += size;
+    }
 }
 
 fn main() -> Result<()> {
@@ -161,23 +191,27 @@ fn main() -> Result<()> {
         None
     };
 
+    let (tx, rx) = mpsc::channel();
+
     let home = dirs::home_dir().expect("HOME not set.");
     let notes_dir = home.join("Dropbox/Tasks/notes");
-    let mut results = Vec::new();
-    results.append(&mut handle_dir(notes_dir, &pass).unwrap());
+    handle_dir(notes_dir, &pass, tx.clone()).unwrap();
 
     let pdf_dir = home.join("Documents/Finanzen");
-    results.append(&mut handle_dir(pdf_dir, &pass).unwrap());
+    handle_dir(pdf_dir, &pass, tx.clone()).unwrap();
 
     let secrets_dir = home.join("Documents/Secrets");
-    results.append(&mut handle_dir(secrets_dir, &pass).unwrap());
+    handle_dir(secrets_dir, &pass, tx).unwrap();
+
+    let (items_tx, items_rx) = mpsc::channel();
+    let adaptor = SkimAdaptor { rx, items_tx, buffer: Vec::new(), nread: 0 };
+
 
     let options: SkimOptions<'_> = SkimOptions::default().multi(false)
         .expect("ctrl-e".to_string());
 
     // TODO(sirver): This should stream eventually.
-    let input = results.iter().map(|n| n.to_string()).join("\n");
-    let skim_output = match Skim::run_with(&options, Some(Box::new(Cursor::new(input)))) {
+    let skim_output = match Skim::run_with(&options, Some(Box::new(adaptor))) {
         None => return Ok(()),
         Some(s) => s,
     };
@@ -187,7 +221,7 @@ fn main() -> Result<()> {
         Some("ctrl-e") => unimplemented!(),
         Some("") | None => {
             let first_selection = skim_output.selected_items.first().unwrap().get_index();
-            let selected_item = &results[first_selection];
+            let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
             if args.open {
                 selected_item.open()?;
             } else {
