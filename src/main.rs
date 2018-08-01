@@ -4,10 +4,9 @@
 
 use skim::{Skim, SkimOptions};
 use std::default::Default;
-use std::io::Cursor;
 use failure::Error;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
 use std::path::{PathBuf, Path};
 use walkdir::WalkDir;
 use std::fmt::{self, Display, Formatter};
@@ -24,6 +23,10 @@ struct CommandLineArguments {
     /// Open the selected file. Default is to just dump it.
     #[structopt(short = "o", long = "open")]
     open: bool,
+
+    /// Also look at vim-encrypted files.
+    #[structopt(short = "e", long = "encrypted")]
+    encrypted: bool,
 }
 
 type Result<T> = ::std::result::Result<T, Error>;
@@ -36,12 +39,15 @@ trait Item: Display {
     fn cat(&self) -> Result<()>;
 }
 
+#[derive(Debug,Clone)]
+enum TextFileLineItemKind { Plain, VimEncrypted(String) }
 
 #[derive(Debug)]
 struct TextFileLineItem {
     path: PathBuf,
     line: String,
     line_index: usize,
+    kind: TextFileLineItemKind,
 }
 
 impl Display for TextFileLineItem {
@@ -50,31 +56,43 @@ impl Display for TextFileLineItem {
     }
 }
 
+fn call_editor(path: &Path, line_index: usize) -> Result<()> {
+    let editor = default_editor::get()?;
+    let mut it = editor.split(" ");
+    let cmd = it.next().unwrap();
+    let mut args: Vec<String> = it.map(|s| s.to_string()).collect();
+    args.push(path.to_str().unwrap().to_string());
+    args.push(format!("+{}", line_index));
+    // TODO(sirver): This kinda hardcodes vim
+    // We ignore errors from vim.
+    let _ = Command::new(cmd).args(&args).spawn()?.wait();
+    Ok(())
+}
+
 impl Item for TextFileLineItem {
     fn open(&self) -> Result<()> {
-        let editor = default_editor::get()?;
-        let mut it = editor.split(" ");
-        let cmd = it.next().unwrap();
-        let mut args: Vec<String> = it.map(|s| s.to_string()).collect();
-        args.push(self.path.to_str().unwrap().to_string());
-        args.push(format!("+{}", self.line_index + 1));
-        // TODO(sirver): This kinda hardcodes vim
-        // We ignore errors from vim.
-        let _ = Command::new(cmd).args(&args).spawn()?.wait();
-        Ok(())
+        call_editor(&self.path, self.line_index + 1)
     }
 
     fn cat(&self) -> Result<()> {
-        let output = std::fs::read_to_string(&self.path)?;
+        let output = match self.kind {
+            TextFileLineItemKind::Plain => {
+                std::fs::read_to_string(&self.path)?
+            },
+            TextFileLineItemKind::VimEncrypted(ref password) => {
+                let output = std::fs::read(&self.path)?;
+                let content = vimdecrypt::decrypt(&output, &password)?;
+                String::from_utf8(content)?
+            },
+        };
         println!("{}", output);
         Ok(())
     }
 }
 
-fn report_txt_file(path: &Path) -> Result<Vec<Box<dyn Item>>> {
+fn report_txt_file_with_content(path: &Path, kind: TextFileLineItemKind, content: impl BufRead) -> Result<Vec<Box<dyn Item>>> {
     let mut lines = Vec::new();
-    let file = fs::File::open(path)?;
-    for (line_index, line) in io::BufReader::new(file).lines().enumerate() {
+    for (line_index, line) in content.lines().enumerate() {
         // The file might be binary, i.e. not UTF-8 parsable.
         if let Ok(line) = line {
             if line.trim().is_empty() {
@@ -82,6 +100,7 @@ fn report_txt_file(path: &Path) -> Result<Vec<Box<dyn Item>>> {
             }
             lines.push(Box::new(TextFileLineItem {
                 path: path.to_path_buf(),
+                kind: kind.clone(),
                 line, line_index,
             }) as Box<dyn Item>);
         }
@@ -89,12 +108,34 @@ fn report_txt_file(path: &Path) -> Result<Vec<Box<dyn Item>>> {
     Ok(lines)
 }
 
+fn report_txt_file(path: &Path, password: &Option<String>) -> Result<Vec<Box<dyn Item>>> {
+    match password {
+        None => report_txt_file_with_content(path, TextFileLineItemKind::Plain, BufReader::new(fs::File::open(path)?)),
+        Some(pw) => {
+            // Enough space for "VimCrypt~".
+            let mut buf = vec![0u8; 9];
+            let mut file = fs::File::open(path)?;
+            file.read(&mut buf)?;
+            if buf == b"VimCrypt~" {
+                file.seek(SeekFrom::Start(0))?;
+                // NOCOM(#sirver): contents need to be dumped correctly.
+                let mut file_contents = Vec::new();
+                file.read_to_end(&mut file_contents)?;
+                let content = vimdecrypt::decrypt(&file_contents, pw)?;
+                report_txt_file_with_content(path, TextFileLineItemKind::VimEncrypted(pw.to_string()), BufReader::new(Cursor::new(content)))
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
 // fn report_any_file(path: &Path) -> Result<Vec<Box<dyn Item>>> {
     // println!("{}", path.display());
     // Ok(())
 // }
 
-fn handle_dir(path: impl AsRef<Path>) -> Result<Vec<Box<dyn Item>>> {
+fn handle_dir(path: impl AsRef<Path>, password: &Option<String>) -> Result<Vec<Box<dyn Item>>> {
     let mut result = Vec::new();
     for entry in WalkDir::new(path.as_ref()) {
         if entry.is_err() {
@@ -102,7 +143,7 @@ fn handle_dir(path: impl AsRef<Path>) -> Result<Vec<Box<dyn Item>>> {
         }
         let entry = entry.unwrap();
         let mut new_results = match entry.path().extension().map(|s| s.to_str().unwrap()) {
-            Some("md") | Some("txt") => report_txt_file(entry.path()),
+            Some("md") | Some("txt") => report_txt_file(entry.path(), &password),
             _ => continue,
             // _ => report_any_file(entry.path()),
         }?;
@@ -114,13 +155,22 @@ fn handle_dir(path: impl AsRef<Path>) -> Result<Vec<Box<dyn Item>>> {
 fn main() -> Result<()> {
     let args = CommandLineArguments::from_args();
 
+    let pass = if args.encrypted {
+        Some(rpassword::prompt_password_stdout("Password: ").unwrap())
+    } else {
+        None
+    };
+
     let home = dirs::home_dir().expect("HOME not set.");
     let notes_dir = home.join("Dropbox/Tasks/notes");
     let mut results = Vec::new();
-    results.append(&mut handle_dir(notes_dir).unwrap());
+    results.append(&mut handle_dir(notes_dir, &pass).unwrap());
 
     let pdf_dir = home.join("Documents/Finanzen");
-    results.append(&mut handle_dir(pdf_dir).unwrap());
+    results.append(&mut handle_dir(pdf_dir, &pass).unwrap());
+
+    let secrets_dir = home.join("Documents/Secrets");
+    results.append(&mut handle_dir(secrets_dir, &pass).unwrap());
 
     let options: SkimOptions<'_> = SkimOptions::default().multi(false)
         .expect("ctrl-e".to_string());
