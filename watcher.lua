@@ -12,6 +12,10 @@ return {
       },
       commands = {
          {
+            name = "Running cargo test",
+            command = "cargo +nightly test --all --release --color=always",
+         },
+         {
             name = "Running cargo build",
             command = "cargo +nightly build --all --release --color=always",
          },

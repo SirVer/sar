@@ -6,7 +6,7 @@ use skim::{Skim, SkimOptions};
 use std::default::Default;
 use failure::Error;
 use std::fs;
-use std::io::{Write, BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
+use std::io::{BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
 use std::path::{PathBuf, Path};
 use walkdir::WalkDir;
 use std::fmt::{self, Display, Formatter};
@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::mpsc;
 use scoped_pool::Pool;
 use structopt::StructOpt;
+use std::collections::VecDeque;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
 
@@ -147,29 +148,33 @@ struct SkimAdaptor {
     items_tx: mpsc::Sender<Box<dyn Item>>,
     // TODO(sirver): Queing all data into memory is hardly a wise approach. Instead keep a Deque of
     // strings we need to feed in read.
-    buffer: Vec<u8>,
-    nread: usize,
+    buffer: VecDeque<Vec<u8>>,
 }
 
 impl std::io::Read for SkimAdaptor {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.nread == self.buffer.len() {
+        if self.buffer.is_empty() {
             // TODO(sirver): Not very elegant.
             if let Ok(item) = self.rx.recv() {
-                self.buffer.append(&mut item.to_string().into_bytes());
-                self.buffer.extend(b"\n");
+                self.buffer.push_back(item.to_string().into_bytes());
                 self.items_tx.send(item).unwrap();
             };
             while let Ok(item) = self.rx.try_recv() {
-                self.buffer.append(&mut item.to_string().into_bytes());
-                self.buffer.extend(b"\n");
+                self.buffer.push_back(item.to_string().into_bytes());
                 self.items_tx.send(item).unwrap();
             };
         }
-        let num_bytes = buf.len().min(self.buffer.len() - self.nread);
-        buf[0..num_bytes].clone_from_slice(&self.buffer[self.nread..self.nread + num_bytes]);
-        self.nread += num_bytes;
-        Ok(num_bytes)
+        if self.buffer.is_empty() {
+            return Ok(0);
+        }
+        let mut item = self.buffer.pop_front().unwrap();
+        let len = item.len();
+        // TODO(sirver): This is not necessarily always true.
+        assert!(len + 1 < buf.len());
+        buf[0..len].clone_from_slice(&mut item);
+        buf[len] = b'\n';
+        println!("#sirver len: {:#?}", len);
+        Ok(len + 1)
     }
 }
 
@@ -205,16 +210,18 @@ fn main() -> Result<()> {
         scope.execute(move || {
             handle_dir(secrets_dir, pass_ref, tx_clone).unwrap();
         });
+        drop(tx);
 
-        scope.execute(move || {
-            handle_dir("/", pass_ref, tx).unwrap();
-        });
+        // NOCOM(#sirver): this is just for repros
+        // scope.execute(move || {
+            // handle_dir("/", pass_ref, tx).unwrap();
+        // });
 
         // TODO(sirver): this feels weird. somehow this should be the main thread that continues.
         // Maybe we do not want a scoped pool, really, but just a regular thread pool.
         scope.execute(move || {
             let (items_tx, items_rx) = mpsc::channel();
-            let adaptor = SkimAdaptor { rx, items_tx, buffer: Vec::new(), nread: 0 };
+            let adaptor = SkimAdaptor { rx, items_tx, buffer: VecDeque::new() };
 
             let options: SkimOptions<'_> = SkimOptions::default().multi(false)
                 .expect("ctrl-e".to_string());
@@ -247,3 +254,35 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adaptor() {
+        let (tx, rx) = mpsc::channel();
+        let (items_tx, _items_rx) = mpsc::channel();
+
+        let mut adaptor = SkimAdaptor { rx, items_tx, buffer: VecDeque::new() };
+
+        tx.send(Box::new(TextFileLineItem { path: PathBuf::from("/tmp/blub.txt"), kind: TextFileLineItemKind::Plain, line: "foo bar".into(), line_index: 10 }) as Box<dyn Item>).unwrap();
+
+        let mut buf = vec![0u8; 256];
+        assert_eq!(25, adaptor.read(&mut buf).unwrap());
+        assert_eq!(&buf[..25], b"/tmp/blub.txt:11:foo bar\n");
+
+        tx.send(Box::new(TextFileLineItem { path: PathBuf::from("/tmp/blub1.txt"), kind: TextFileLineItemKind::Plain, line: "foo bar blub".into(), line_index: 10 }) as Box<dyn Item>).unwrap();
+        drop(tx);
+
+        assert_eq!(31, adaptor.read(&mut buf).unwrap());
+        assert_eq!(&buf[..31], b"/tmp/blub1.txt:11:foo bar blub\n");
+
+        assert_eq!(0, adaptor.read(&mut buf).unwrap());
+        assert_eq!(0, adaptor.read(&mut buf).unwrap());
+        assert_eq!(0, adaptor.read(&mut buf).unwrap());
+        assert_eq!(0, adaptor.read(&mut buf).unwrap());
+        assert_eq!(0, adaptor.read(&mut buf).unwrap());
+    }
+}
+
