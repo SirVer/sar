@@ -12,11 +12,17 @@ use walkdir::WalkDir;
 use std::fmt::{self, Display, Formatter};
 use std::process::Command;
 use std::sync::mpsc;
+use serde_derive::Deserialize;
 use scoped_pool::Pool;
 use structopt::StructOpt;
 use std::collections::VecDeque;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
+
+#[derive(Deserialize,Debug)]
+struct ConfigurationFile {
+    reading_directories: Vec<String>,
+}
 
 /// SirVer's archiver. Information retriever and writer.
 #[derive(StructOpt, Debug)]
@@ -129,15 +135,15 @@ fn report_txt_file(path: &Path, password: &Option<String>, tx: &mut mpsc::Sender
 
 fn handle_dir(path: impl AsRef<Path>, password: &Option<String>, mut tx: mpsc::Sender<Box<dyn Item>>) -> Result<()> {
     for entry in WalkDir::new(path.as_ref()) {
-        if entry.is_err() {
-            continue;
+        if let Ok(entry) = entry {
+            if let Some(ext) = entry.path().extension() {
+                match ext.to_str() {
+                    Some("md") | Some("txt") => report_txt_file(entry.path(), &password, &mut tx)?,
+                    _ => (),
+                    // _ => report_any_file(entry.path()),
+                };
+            }
         }
-        let entry = entry.unwrap();
-        match entry.path().extension().map(|s| s.to_str().unwrap()) {
-            Some("md") | Some("txt") => report_txt_file(entry.path(), &password, &mut tx)?,
-            _ => continue,
-            // _ => report_any_file(entry.path()),
-        };
     }
     Ok(())
 }
@@ -173,13 +179,16 @@ impl std::io::Read for SkimAdaptor {
         assert!(len + 1 < buf.len());
         buf[0..len].clone_from_slice(&mut item);
         buf[len] = b'\n';
-        println!("#sirver len: {:#?}", len);
         Ok(len + 1)
     }
 }
 
 fn main() -> Result<()> {
     let args = CommandLineArguments::from_args();
+    let configuration_file: ConfigurationFile = {
+        let home = dirs::home_dir().expect("HOME not set.");
+        toml::from_str(&std::fs::read_to_string(home.join(".sarrc"))?)?
+    };
 
     let pass = if args.encrypted {
         Some(rpassword::prompt_password_stdout("Password: ").unwrap())
@@ -191,31 +200,15 @@ fn main() -> Result<()> {
 
     let pool = Pool::new(10);
     pool.scoped(|scope| {
-        let home = dirs::home_dir().expect("HOME not set.");
-        let notes_dir = home.join("Dropbox/Tasks/notes");
-        let tx_clone = tx.clone();
-        let pass_ref = &pass;
-        scope.execute(move || {
-            handle_dir(notes_dir, pass_ref, tx_clone).unwrap();
-        });
-
-        let pdf_dir = home.join("Documents/Finanzen");
-        let tx_clone = tx.clone();
-        scope.execute(move || {
-            handle_dir(pdf_dir, pass_ref, tx_clone).unwrap();
-        });
-
-        let secrets_dir = home.join("Documents/Secrets");
-        let tx_clone = tx.clone();
-        scope.execute(move || {
-            handle_dir(secrets_dir, pass_ref, tx_clone).unwrap();
-        });
+        for dir in configuration_file.reading_directories {
+            let tx_clone = tx.clone();
+            let pass_ref = &pass;
+            scope.execute(move || {
+                let full_directory = shellexpand::tilde(&dir);
+                handle_dir(&*full_directory, pass_ref, tx_clone).unwrap();
+            });
+        }
         drop(tx);
-
-        // NOCOM(#sirver): this is just for repros
-        // scope.execute(move || {
-            // handle_dir("/", pass_ref, tx).unwrap();
-        // });
 
         // TODO(sirver): this feels weird. somehow this should be the main thread that continues.
         // Maybe we do not want a scoped pool, really, but just a regular thread pool.
