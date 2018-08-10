@@ -1,0 +1,68 @@
+# Based on the "trust" template v0.1.2
+# https://github.com/japaric/trust/tree/v0.1.2
+
+dist: trusty
+language: rust
+services: docker
+sudo: required
+
+env:
+  global:
+    - CRATE_NAME=sar
+
+matrix:
+  include:
+    # Linux
+    - env: TARGET=armv7-unknown-linux-gnueabihf
+      rust: nightly
+    - env: TARGET=i686-unknown-linux-musl
+      rust: nightly
+    - env: TARGET=x86_64-unknown-linux-musl
+      rust: nightly
+
+    # OSX
+    - env: TARGET=x86_64-apple-darwin
+      os: osx
+      rust: nightly
+
+before_install:
+  - set -e
+  - rustup self update
+
+install:
+  - sh ci/install.sh
+  - source ~/.cargo/env || true
+
+script:
+  - bash ci/script.sh
+
+after_script: set +e
+
+before_deploy:
+  - sh ci/before_deploy.sh
+
+deploy:
+  api_key:
+    secure: "1IxGCH/BOKeg4pmNxqKg1jBH74HBwaDb2CVIfAiXPqaxhh7EfWPxauHphkZULHX9yXurpkJKUFf7Ak0lWnYFbTP1VxvhHUghshXFjhmrnkhRopHmbsC3nPLr/LHsD5fCM0dYaUCtpH8+k4EiKq7hmzQbvhyrItqZfbHV8sn6O54FFKX5rEZxLHQ/pv5QyCBvR4XgH2DgcddUNv4qMCm6OPiehZcxovjfOposaQANao4Cff+W5Cw6K33GtlHNBsbYML069rmcMDCo4oFpCvXMEBvrYfSwmQcvp9eCEjISER6Jb1Ptaw0BAhCjFucG4p3UJJZj+IF8WFVQdlEcOO+PQGqBgafgelb1/0JeKwEdXtsfckzZqXOknLr7Iptn9bUzfuQViIz1M1x5RdOBm0BVp5vMBKkC/rj4ptJPtf3U5NFA3FnbkMee+oL9l+kRbjUbfoSywoZeQlvWh5v+2it70PZBuxfmEdPyMIeo3HTIs35O413jwFrlB1FzIt3fY25jOxUCkZRTR3ICX7Biaxt0kMIxuOJCV1lJvEuU0UkKQGWdAlzfJCKpJVIbKAhMNywx+ugwr6ws8VpyftnOyVxxEzlau3WYkrM+t0tM7hV5GOq+t5pyp2q06/0N6H60sLUHzVNwSX21R196/uMjEymIAWOVsE0rB1Kc46PwLSF6HjQ="
+  file_glob: true
+  file: $CRATE_NAME-$TRAVIS_TAG-$TARGET.*
+  on:
+    condition: $TRAVIS_RUST_VERSION = nightly
+    tags: true
+  provider: releases
+  skip_cleanup: true
+
+cache: cargo
+before_cache:
+  # Travis can't cache files that are not readable by "others"
+  - chmod -R a+r $HOME/.cargo
+
+branches:
+  only:
+    # release tags
+    - /^v\d+\.\d+\.\d+.*$/
+    - master
+
+notifications:
+  email:
+    on_success: never
