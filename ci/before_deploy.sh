@@ -17,9 +17,9 @@ main() {
 
     test -f Cargo.lock || cargo generate-lockfile
 
-    # Deploy the 'g' binary.
-    cross rustc --bin g --target $TARGET --release -- -C lto
-    cp target/$TARGET/release/g $stage/
+    # Deploy the 'sar' binary.
+    cross rustc --bin sar --target $TARGET --release -- -C lto
+    cp target/$TARGET/release/sar $stage/
 
     cd $stage
     tar czf $src/$CRATE_NAME-$TRAVIS_TAG-$TARGET.tar.gz *
