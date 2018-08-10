@@ -16,6 +16,7 @@ use serde_derive::Deserialize;
 use scoped_pool::Pool;
 use structopt::StructOpt;
 use std::collections::VecDeque;
+use self_update::cargo_crate_version;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
 
@@ -35,6 +36,10 @@ struct CommandLineArguments {
     /// Also look at vim-encrypted files.
     #[structopt(short = "e", long = "encrypted")]
     encrypted: bool,
+
+    /// Update the binary from a new release on github and exit.
+    #[structopt(long = "update")]
+    update: bool,
 }
 
 type Result<T> = ::std::result::Result<T, Error>;
@@ -183,8 +188,29 @@ impl std::io::Read for SkimAdaptor {
     }
 }
 
+fn update() -> Result<()> {
+    let target = self_update::get_target()?;
+    self_update::backends::github::Update::configure()?
+        .repo_owner("SirVer")
+        .repo_name("sar")
+        .target(&target)
+        .bin_name("sar")
+        .show_download_progress(true)
+        .show_output(false)
+        .no_confirm(true)
+        .current_version(cargo_crate_version!())
+        .build()?
+        .update()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = CommandLineArguments::from_args();
+
+    if args.update {
+        update()?;
+        return Ok(());
+    }
     let configuration_file: ConfigurationFile = {
         let home = dirs::home_dir().expect("HOME not set.");
         toml::from_str(&std::fs::read_to_string(home.join(".sarrc"))?)?
