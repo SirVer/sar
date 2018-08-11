@@ -295,7 +295,8 @@ fn update() -> Result<()> {
 #[derive(Debug)]
 enum Exit {
     CreateNew,
-    Show, /// Sometimes also called Reveal.
+    /// Sometimes also called Reveal.
+    Show,
     Open,
     Cat,
 }
