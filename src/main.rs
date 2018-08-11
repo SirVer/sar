@@ -8,6 +8,7 @@ use serde_derive::Deserialize;
 use skim::{Skim, SkimOptions};
 use std::collections::VecDeque;
 use std::default::Default;
+use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
@@ -228,21 +229,13 @@ fn handle_dir(
             continue;
         }
         let path = entry.unwrap().path().to_path_buf();
-        match path.extension() {
-            None => {
-                // TODO(sirver): Report as regular file?
-                continue;
-            }
-            Some(_) => {
-                let tx_clone = tx.clone();
-                scope.execute(move || {
-                    match path.extension().unwrap().to_str() {
-                        Some("md") | Some("txt") => report_txt_file(path, password, tx_clone),
-                        _ => report_any_file(path, tx_clone),
-                    }.unwrap()
-                });
-            }
-        }
+        let tx_clone = tx.clone();
+        scope.execute(move || {
+            match path.extension().and_then(OsStr::to_str) {
+                Some("md") | Some("txt") => report_txt_file(path, password, tx_clone),
+                _ => report_any_file(path, tx_clone),
+            }.unwrap()
+        });
     }
     Ok(())
 }
