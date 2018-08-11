@@ -24,6 +24,31 @@ struct ConfigurationFile {
     reading_directories: Vec<String>,
 }
 
+/// On MacOs calls 'open -R' on the path, which will reveal it in Finder. On other OSes, will
+/// just call through to 'open_path' with the parent of the selected path.
+#[cfg(target_os = "macos")]
+fn reveal_path(path: &Path) -> Result<()> {
+    let _ = Command::new("open")
+        .args(&["-R", path.to_str().unwrap()])
+        .spawn()?
+        .wait();
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_path(path: &Path) -> Result<()> {
+    open_path(&path.parent().unwrap())
+}
+
+fn open_path(path: &Path) -> Result<()> {
+    // TODO(sirver): This is fairly specific.
+    let _ = Command::new("open.py")
+        .args(&[path.to_str().unwrap()])
+        .spawn()?
+        .wait();
+    Ok(())
+}
+
 /// SirVer's archiver. Information retriever and writer.
 #[derive(StructOpt, Debug)]
 #[structopt(name = "sar")]
@@ -40,11 +65,39 @@ struct CommandLineArguments {
 type Result<T> = ::std::result::Result<T, Error>;
 
 trait Item: Display + Send + Sync {
+    /// The file of this item.
+    fn path(&self) -> &Path;
+
     /// Open the given Item for editing.
     fn open(&self) -> Result<()>;
 
     /// Display the given Items content.
     fn cat(&self) -> Result<()>;
+}
+
+#[derive(Debug)]
+struct AnyFileItem {
+    path: PathBuf,
+}
+
+impl Display for AnyFileItem {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.display())
+    }
+}
+
+impl Item for AnyFileItem {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+    fn open(&self) -> Result<()> {
+        println!("{}", self.path.to_str().unwrap());
+        Ok(())
+    }
+    fn cat(&self) -> Result<()> {
+        open_path(&self.path)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +140,9 @@ fn call_editor(path: &Path, line_index: usize) -> Result<()> {
 }
 
 impl Item for TextFileLineItem {
+    fn path(&self) -> &Path {
+        &self.path
+    }
     fn open(&self) -> Result<()> {
         call_editor(&self.path, self.line_index + 1)
     }
@@ -106,7 +162,7 @@ impl Item for TextFileLineItem {
 }
 
 fn report_txt_file_with_content(
-    path: &Path,
+    path: PathBuf,
     kind: TextFileLineItemKind,
     content: impl BufRead,
     tx: mpsc::Sender<Box<dyn Item>>,
@@ -118,8 +174,8 @@ fn report_txt_file_with_content(
                 continue;
             }
             tx.send(Box::new(TextFileLineItem {
-                path: path.to_path_buf(),
                 kind: kind.clone(),
+                path: path.clone(),
                 line,
                 line_index,
             }) as Box<dyn Item>)?;
@@ -129,14 +185,14 @@ fn report_txt_file_with_content(
 }
 
 fn report_txt_file(
-    path: &Path,
+    path: PathBuf,
     password: &Option<String>,
     tx: mpsc::Sender<Box<dyn Item>>,
 ) -> Result<()> {
     if let Some(pw) = password {
         // Enough space for "VimCrypt~".
         let mut buf = vec![0u8; 9];
-        let mut file = fs::File::open(path)?;
+        let mut file = fs::File::open(&path)?;
         file.read(&mut buf)?;
         if buf == b"VimCrypt~" {
             file.seek(SeekFrom::Start(0))?;
@@ -152,12 +208,13 @@ fn report_txt_file(
             return Ok(());
         }
     }
-    report_txt_file_with_content(
-        path,
-        TextFileLineItemKind::Plain,
-        BufReader::new(fs::File::open(path)?),
-        tx,
-    )
+    let reader = BufReader::new(fs::File::open(&path)?);
+    report_txt_file_with_content(path, TextFileLineItemKind::Plain, reader, tx)
+}
+
+fn report_any_file(path: PathBuf, tx: mpsc::Sender<Box<dyn Item>>) -> Result<()> {
+    tx.send(Box::new(AnyFileItem { path }) as Box<dyn Item>)?;
+    Ok(())
 }
 
 fn handle_dir(
@@ -178,10 +235,11 @@ fn handle_dir(
             }
             Some(_) => {
                 let tx_clone = tx.clone();
-                scope.execute(move || match path.extension().unwrap().to_str() {
-                    Some("md") | Some("txt") => report_txt_file(&path, password, tx_clone).unwrap(),
-                    _ => (),
-                    // _ => report_any_file(entry.path()),
+                scope.execute(move || {
+                    match path.extension().unwrap().to_str() {
+                        Some("md") | Some("txt") => report_txt_file(path, password, tx_clone),
+                        _ => report_any_file(path, tx_clone),
+                    }.unwrap()
                 });
             }
         }
@@ -243,6 +301,7 @@ fn update() -> Result<()> {
 #[derive(Debug)]
 enum Exit {
     CreateNew,
+    Reveal,
     Open,
     Cat,
 }
@@ -291,7 +350,7 @@ fn main() -> Result<()> {
 
             let options: SkimOptions<'_> = SkimOptions::default()
                 .multi(false)
-                .expect("ctrl-e,ctrl-o".to_string());
+                .expect("ctrl-n,ctrl-r,ctrl-o".to_string());
 
             // TODO(sirver): This should stream eventually.
             let skim_output =
@@ -302,7 +361,8 @@ fn main() -> Result<()> {
 
             let exit_mode = match skim_output.accept_key.as_ref().map(|s| s as &str) {
                 // TODO(sirver): Implement creating a new note.
-                Some("ctrl-e") => Exit::CreateNew,
+                Some("ctrl-n") => Exit::CreateNew,
+                Some("ctrl-r") => Exit::Reveal,
                 Some("ctrl-o") => Exit::Open,
                 Some("") | None => Exit::Cat,
                 Some(unexpected_str) => {
@@ -315,9 +375,10 @@ fn main() -> Result<()> {
             let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
             match exit_mode {
                 Exit::CreateNew => unimplemented!(),
-                Exit::Open => selected_item.open().unwrap(),
-                Exit::Cat => selected_item.cat().unwrap(),
-            }
+                Exit::Reveal => reveal_path(&selected_item.path()),
+                Exit::Open => selected_item.open(),
+                Exit::Cat => selected_item.cat(),
+            }.unwrap()
         });
     });
 
