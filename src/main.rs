@@ -244,15 +244,16 @@ fn handle_dir(
 struct SkimAdaptor {
     rx: mpsc::Receiver<Box<dyn Item>>,
     items_tx: mpsc::Sender<Box<dyn Item>>,
-    // TODO(sirver): Queing all data into memory is hardly a wise approach. Instead keep a Deque of
-    // strings we need to feed in read.
     buffer: VecDeque<Vec<u8>>,
 }
 
 impl std::io::Read for SkimAdaptor {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.buffer.is_empty() {
-            // TODO(sirver): Not very elegant.
+            // We want to ensure that if we do not have anything to 'read', we want to wait for at
+            // least one item to arrive. If all crawler threads are already done, we do not have
+            // any more items and all 'tx' will have been dropped. This means that 'revc' will
+            // return with an error immediately.
             if let Ok(item) = self.rx.recv() {
                 self.buffer.push_back(item.to_string().into_bytes());
                 self.items_tx.send(item).unwrap();
@@ -345,7 +346,6 @@ fn main() -> Result<()> {
                 .multi(false)
                 .expect("ctrl-n,ctrl-s,ctrl-o".to_string());
 
-            // TODO(sirver): This should stream eventually.
             let skim_output =
                 match Skim::run_with(&options, Some(Box::new(BufReader::new(adaptor)))) {
                     None => return,
@@ -353,7 +353,6 @@ fn main() -> Result<()> {
                 };
 
             let exit_mode = match skim_output.accept_key.as_ref().map(|s| s as &str) {
-                // TODO(sirver): Implement creating a new note.
                 Some("ctrl-n") => Exit::CreateNew,
                 Some("ctrl-s") => Exit::Show,
                 Some("ctrl-o") => Exit::Open,
@@ -367,6 +366,7 @@ fn main() -> Result<()> {
             let first_selection = skim_output.selected_items.first().unwrap().get_index();
             let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
             match exit_mode {
+                // TODO(sirver): Implement creating a new note.
                 Exit::CreateNew => unimplemented!(),
                 Exit::Show => show_path(&selected_item.path()),
                 Exit::Open => selected_item.open(),
