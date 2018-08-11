@@ -1,26 +1,25 @@
 #![feature(rust_2018_preview)]
 #![warn(rust_2018_idioms)]
 
-
-use skim::{Skim, SkimOptions};
-use std::default::Default;
 use failure::Error;
-use std::fs;
-use std::io::{BufRead, Read, Seek, SeekFrom, BufReader, Cursor};
-use std::path::{PathBuf, Path};
-use walkdir::WalkDir;
+use scoped_pool::{Pool, Scope};
+use self_update::cargo_crate_version;
+use serde_derive::Deserialize;
+use skim::{Skim, SkimOptions};
+use std::collections::VecDeque;
+use std::default::Default;
 use std::fmt::{self, Display, Formatter};
+use std::fs;
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use serde_derive::Deserialize;
-use scoped_pool::Pool;
 use structopt::StructOpt;
-use std::collections::VecDeque;
-use self_update::cargo_crate_version;
+use walkdir::WalkDir;
 
 // TODO(sirver): Use https://github.com/jrmuizel/pdf-extract for PDF -> Text extraction.
 
-#[derive(Deserialize,Debug)]
+#[derive(Deserialize, Debug)]
 struct ConfigurationFile {
     reading_directories: Vec<String>,
 }
@@ -29,10 +28,6 @@ struct ConfigurationFile {
 #[derive(StructOpt, Debug)]
 #[structopt(name = "sar")]
 struct CommandLineArguments {
-    /// Open the selected file. Default is to just dump it.
-    #[structopt(short = "o", long = "open")]
-    open: bool,
-
     /// Also look at vim-encrypted files.
     #[structopt(short = "e", long = "encrypted")]
     encrypted: bool,
@@ -52,8 +47,11 @@ trait Item: Display + Send + Sync {
     fn cat(&self) -> Result<()>;
 }
 
-#[derive(Debug,Clone)]
-enum TextFileLineItemKind { Plain, VimEncrypted(String) }
+#[derive(Debug, Clone)]
+enum TextFileLineItemKind {
+    Plain,
+    VimEncrypted(String),
+}
 
 #[derive(Debug)]
 struct TextFileLineItem {
@@ -65,7 +63,13 @@ struct TextFileLineItem {
 
 impl Display for TextFileLineItem {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.path.display(), self.line_index + 1, self.line)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.path.display(),
+            self.line_index + 1,
+            self.line
+        )
     }
 }
 
@@ -89,21 +93,24 @@ impl Item for TextFileLineItem {
 
     fn cat(&self) -> Result<()> {
         let output = match self.kind {
-            TextFileLineItemKind::Plain => {
-                std::fs::read_to_string(&self.path)?
-            },
+            TextFileLineItemKind::Plain => std::fs::read_to_string(&self.path)?,
             TextFileLineItemKind::VimEncrypted(ref password) => {
                 let output = std::fs::read(&self.path)?;
                 let content = vimdecrypt::decrypt(&output, &password)?;
                 String::from_utf8(content)?
-            },
+            }
         };
         println!("{}", output);
         Ok(())
     }
 }
 
-fn report_txt_file_with_content(path: &Path, kind: TextFileLineItemKind, content: impl BufRead, tx: &mut mpsc::Sender<Box<dyn Item>>) -> Result<()> {
+fn report_txt_file_with_content(
+    path: &Path,
+    kind: TextFileLineItemKind,
+    content: impl BufRead,
+    tx: mpsc::Sender<Box<dyn Item>>,
+) -> Result<()> {
     for (line_index, line) in content.lines().enumerate() {
         // The file might be binary, i.e. not UTF-8 parsable.
         if let Ok(line) = line {
@@ -113,14 +120,19 @@ fn report_txt_file_with_content(path: &Path, kind: TextFileLineItemKind, content
             tx.send(Box::new(TextFileLineItem {
                 path: path.to_path_buf(),
                 kind: kind.clone(),
-                line, line_index,
+                line,
+                line_index,
             }) as Box<dyn Item>)?;
         }
     }
     Ok(())
 }
 
-fn report_txt_file(path: &Path, password: &Option<String>, tx: &mut mpsc::Sender<Box<dyn Item>>) -> Result<()> {
+fn report_txt_file(
+    path: &Path,
+    password: &Option<String>,
+    tx: mpsc::Sender<Box<dyn Item>>,
+) -> Result<()> {
     if let Some(pw) = password {
         // Enough space for "VimCrypt~".
         let mut buf = vec![0u8; 9];
@@ -131,22 +143,46 @@ fn report_txt_file(path: &Path, password: &Option<String>, tx: &mut mpsc::Sender
             let mut file_contents = Vec::new();
             file.read_to_end(&mut file_contents)?;
             let content = vimdecrypt::decrypt(&file_contents, pw)?;
-            report_txt_file_with_content(path, TextFileLineItemKind::VimEncrypted(pw.to_string()), BufReader::new(Cursor::new(content)), tx)?;
+            report_txt_file_with_content(
+                path,
+                TextFileLineItemKind::VimEncrypted(pw.to_string()),
+                BufReader::new(Cursor::new(content)),
+                tx,
+            )?;
             return Ok(());
         }
     }
-    report_txt_file_with_content(path, TextFileLineItemKind::Plain, BufReader::new(fs::File::open(path)?), tx)
+    report_txt_file_with_content(
+        path,
+        TextFileLineItemKind::Plain,
+        BufReader::new(fs::File::open(path)?),
+        tx,
+    )
 }
 
-fn handle_dir(path: impl AsRef<Path>, password: &Option<String>, mut tx: mpsc::Sender<Box<dyn Item>>) -> Result<()> {
+fn handle_dir(
+    scope: &Scope<'a>,
+    path: impl AsRef<Path>,
+    password: &'a Option<String>,
+    tx: mpsc::Sender<Box<dyn Item>>,
+) -> Result<()> {
     for entry in WalkDir::new(path.as_ref()) {
-        if let Ok(entry) = entry {
-            if let Some(ext) = entry.path().extension() {
-                match ext.to_str() {
-                    Some("md") | Some("txt") => report_txt_file(entry.path(), &password, &mut tx)?,
+        if entry.is_err() {
+            continue;
+        }
+        let path = entry.unwrap().path().to_path_buf();
+        match path.extension() {
+            None => {
+                // TODO(sirver): Report as regular file?
+                continue;
+            }
+            Some(_) => {
+                let tx_clone = tx.clone();
+                scope.execute(move || match path.extension().unwrap().to_str() {
+                    Some("md") | Some("txt") => report_txt_file(&path, password, tx_clone).unwrap(),
                     _ => (),
                     // _ => report_any_file(entry.path()),
-                };
+                });
             }
         }
     }
@@ -173,7 +209,7 @@ impl std::io::Read for SkimAdaptor {
             while let Ok(item) = self.rx.try_recv() {
                 self.buffer.push_back(item.to_string().into_bytes());
                 self.items_tx.send(item).unwrap();
-            };
+            }
         }
         if self.buffer.is_empty() {
             return Ok(0);
@@ -204,6 +240,13 @@ fn update() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum Exit {
+    CreateNew,
+    Open,
+    Cat,
+}
+
 fn main() -> Result<()> {
     let args = CommandLineArguments::from_args();
 
@@ -229,9 +272,9 @@ fn main() -> Result<()> {
         for dir in configuration_file.reading_directories {
             let tx_clone = tx.clone();
             let pass_ref = &pass;
-            scope.execute(move || {
+            scope.recurse(move |scope| {
                 let full_directory = shellexpand::tilde(&dir);
-                handle_dir(&*full_directory, pass_ref, tx_clone).unwrap();
+                handle_dir(scope, &*full_directory, pass_ref, tx_clone).unwrap();
             });
         }
         drop(tx);
@@ -240,34 +283,41 @@ fn main() -> Result<()> {
         // Maybe we do not want a scoped pool, really, but just a regular thread pool.
         scope.execute(move || {
             let (items_tx, items_rx) = mpsc::channel();
-            let adaptor = SkimAdaptor { rx, items_tx, buffer: VecDeque::new() };
-
-            let options: SkimOptions<'_> = SkimOptions::default().multi(false)
-                .expect("ctrl-e".to_string());
-
-            // TODO(sirver): This should stream eventually.
-            let skim_output = match Skim::run_with(&options, Some(Box::new(BufReader::new(adaptor)))) {
-                None => return,
-                Some(s) => s,
+            let adaptor = SkimAdaptor {
+                rx,
+                items_tx,
+                buffer: VecDeque::new(),
             };
 
-            match skim_output.accept_key.as_ref().map(|s| s as &str) {
+            let options: SkimOptions<'_> = SkimOptions::default()
+                .multi(false)
+                .expect("ctrl-e,ctrl-o".to_string());
+
+            // TODO(sirver): This should stream eventually.
+            let skim_output =
+                match Skim::run_with(&options, Some(Box::new(BufReader::new(adaptor)))) {
+                    None => return,
+                    Some(s) => s,
+                };
+
+            let exit_mode = match skim_output.accept_key.as_ref().map(|s| s as &str) {
                 // TODO(sirver): Implement creating a new note.
-                Some("ctrl-e") => unimplemented!(),
-                Some("") | None => {
-                    let first_selection = skim_output.selected_items.first().unwrap().get_index();
-                    let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
-                    if args.open {
-                        selected_item.open().unwrap();
-                    } else {
-                        selected_item.cat().unwrap();
-                    };
-                },
+                Some("ctrl-e") => Exit::CreateNew,
+                Some("ctrl-o") => Exit::Open,
+                Some("") | None => Exit::Cat,
                 Some(unexpected_str) => {
                     // Skim should guarantee that this never happens.
                     unreachable!("Got unexpected: {:?}", unexpected_str);
-                },
+                }
             };
+
+            let first_selection = skim_output.selected_items.first().unwrap().get_index();
+            let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
+            match exit_mode {
+                Exit::CreateNew => unimplemented!(),
+                Exit::Open => selected_item.open().unwrap(),
+                Exit::Cat => selected_item.cat().unwrap(),
+            }
         });
     });
 
@@ -283,15 +333,29 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (items_tx, _items_rx) = mpsc::channel();
 
-        let mut adaptor = SkimAdaptor { rx, items_tx, buffer: VecDeque::new() };
+        let mut adaptor = SkimAdaptor {
+            rx,
+            items_tx,
+            buffer: VecDeque::new(),
+        };
 
-        tx.send(Box::new(TextFileLineItem { path: PathBuf::from("/tmp/blub.txt"), kind: TextFileLineItemKind::Plain, line: "foo bar".into(), line_index: 10 }) as Box<dyn Item>).unwrap();
+        tx.send(Box::new(TextFileLineItem {
+            path: PathBuf::from("/tmp/blub.txt"),
+            kind: TextFileLineItemKind::Plain,
+            line: "foo bar".into(),
+            line_index: 10,
+        }) as Box<dyn Item>).unwrap();
 
         let mut buf = vec![0u8; 256];
         assert_eq!(25, adaptor.read(&mut buf).unwrap());
         assert_eq!(&buf[..25], b"/tmp/blub.txt:11:foo bar\n");
 
-        tx.send(Box::new(TextFileLineItem { path: PathBuf::from("/tmp/blub1.txt"), kind: TextFileLineItemKind::Plain, line: "foo bar blub".into(), line_index: 10 }) as Box<dyn Item>).unwrap();
+        tx.send(Box::new(TextFileLineItem {
+            path: PathBuf::from("/tmp/blub1.txt"),
+            kind: TextFileLineItemKind::Plain,
+            line: "foo bar blub".into(),
+            line_index: 10,
+        }) as Box<dyn Item>).unwrap();
         drop(tx);
 
         assert_eq!(31, adaptor.read(&mut buf).unwrap());
@@ -304,4 +368,3 @@ mod tests {
         assert_eq!(0, adaptor.read(&mut buf).unwrap());
     }
 }
-
