@@ -28,7 +28,7 @@ struct ConfigurationFile {
 /// On MacOs calls 'open -R' on the path, which will reveal it in Finder. On other OSes, will
 /// just call through to 'open_path' with the parent of the selected path.
 #[cfg(target_os = "macos")]
-fn reveal_path(path: &Path) -> Result<()> {
+fn show_path(path: &Path) -> Result<()> {
     let _ = Command::new("open")
         .args(&["-R", path.to_str().unwrap()])
         .spawn()?
@@ -37,7 +37,7 @@ fn reveal_path(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn reveal_path(path: &Path) -> Result<()> {
+fn show_path(path: &Path) -> Result<()> {
     open_path(&path.parent().unwrap())
 }
 
@@ -294,7 +294,7 @@ fn update() -> Result<()> {
 #[derive(Debug)]
 enum Exit {
     CreateNew,
-    Reveal,
+    Show, /// Sometimes also called Reveal.
     Open,
     Cat,
 }
@@ -343,7 +343,7 @@ fn main() -> Result<()> {
 
             let options: SkimOptions<'_> = SkimOptions::default()
                 .multi(false)
-                .expect("ctrl-n,ctrl-r,ctrl-o".to_string());
+                .expect("ctrl-n,ctrl-s,ctrl-o".to_string());
 
             // TODO(sirver): This should stream eventually.
             let skim_output =
@@ -355,7 +355,7 @@ fn main() -> Result<()> {
             let exit_mode = match skim_output.accept_key.as_ref().map(|s| s as &str) {
                 // TODO(sirver): Implement creating a new note.
                 Some("ctrl-n") => Exit::CreateNew,
-                Some("ctrl-r") => Exit::Reveal,
+                Some("ctrl-s") => Exit::Show,
                 Some("ctrl-o") => Exit::Open,
                 Some("") | None => Exit::Cat,
                 Some(unexpected_str) => {
@@ -368,7 +368,7 @@ fn main() -> Result<()> {
             let selected_item = items_rx.into_iter().nth(first_selection).unwrap();
             match exit_mode {
                 Exit::CreateNew => unimplemented!(),
-                Exit::Reveal => reveal_path(&selected_item.path()),
+                Exit::Show => show_path(&selected_item.path()),
                 Exit::Open => selected_item.open(),
                 Exit::Cat => selected_item.cat(),
             }.unwrap()
