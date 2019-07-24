@@ -1,6 +1,3 @@
-#![feature(rust_2018_preview)]
-#![warn(rust_2018_idioms)]
-
 use failure::Error;
 use scoped_pool::{Pool, Scope};
 use self_update::cargo_crate_version;
@@ -11,7 +8,7 @@ use std::default::Default;
 use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -57,6 +54,10 @@ struct CommandLineArguments {
     /// Also look at vim-encrypted files.
     #[structopt(short = "e", long = "encrypted")]
     encrypted: bool,
+
+    /// Only show file names, not looking into file content.
+    #[structopt(long = "files", short = "f")]
+    files: bool,
 
     /// Update the binary from a new release on github and exit.
     #[structopt(long = "update")]
@@ -108,33 +109,38 @@ enum TextFileLineItemKind {
 }
 
 #[derive(Debug)]
+struct Line {
+    line_index: usize,
+    line: String,
+}
+
+#[derive(Debug)]
 struct TextFileLineItem {
     path: PathBuf,
-    line: String,
-    line_index: usize,
+    line: Option<Line>,
     kind: TextFileLineItemKind,
 }
 
 impl Display for TextFileLineItem {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.path.display(),
-            self.line_index + 1,
-            self.line
-        )
+        write!(f, "{}", self.path.display())?;
+        if let Some(l) = &self.line {
+            write!(f, ":{}:{}", l.line_index + 1, l.line)?;
+        }
+        Ok(())
     }
 }
 
-fn call_editor(path: &Path, line_index: usize) -> Result<()> {
+fn call_editor(path: &Path, line_index: Option<usize>) -> Result<()> {
     let editor = default_editor::get()?;
     let mut it = editor.split(" ");
     let cmd = it.next().unwrap();
     let mut args: Vec<String> = it.map(|s| s.to_string()).collect();
     args.push(path.to_str().unwrap().to_string());
-    args.push(format!("+{}", line_index));
-    // TODO(sirver): This kinda hardcodes vim
+    if let Some(idx) = line_index {
+        // TODO(sirver): This kinda hardcodes vim
+        args.push(format!("+{}", idx));
+    }
     // We ignore errors from vim.
     let _ = Command::new(cmd).args(&args).spawn()?.wait();
     Ok(())
@@ -145,7 +151,7 @@ impl Item for TextFileLineItem {
         &self.path
     }
     fn open(&self) -> Result<()> {
-        call_editor(&self.path, self.line_index + 1)
+        call_editor(&self.path, self.line.as_ref().map(|l| l.line_index + 1))
     }
 
     fn cat(&self) -> Result<()> {
@@ -163,54 +169,70 @@ impl Item for TextFileLineItem {
 }
 
 fn report_txt_file_with_content(
+    list_mode: ListMode,
     path: PathBuf,
     kind: TextFileLineItemKind,
     content: impl BufRead,
     tx: mpsc::Sender<Box<dyn Item>>,
 ) -> Result<()> {
-    for (line_index, line) in content.lines().enumerate() {
-        // The file might be binary, i.e. not UTF-8 parsable.
-        if let Ok(line) = line {
-            if line.trim().is_empty() {
-                continue;
-            }
+    match list_mode {
+        ListMode::FileName => {
             tx.send(Box::new(TextFileLineItem {
                 kind: kind.clone(),
                 path: path.clone(),
-                line,
-                line_index,
+                line: None,
             }) as Box<dyn Item>)?;
+        }
+        ListMode::FileContent => {
+            for (line_index, line) in content.lines().enumerate() {
+                // The file might be binary, i.e. not UTF-8 parsable.
+                if let Ok(line) = line {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    tx.send(Box::new(TextFileLineItem {
+                        kind: kind.clone(),
+                        path: path.clone(),
+                        line: Some(Line { line_index, line }),
+                    }) as Box<dyn Item>)?;
+                }
+            }
         }
     }
     Ok(())
 }
 
 fn report_txt_file(
+    list_mode: ListMode,
     path: PathBuf,
     password: &Option<String>,
     tx: mpsc::Sender<Box<dyn Item>>,
 ) -> Result<()> {
-    if let Some(pw) = password {
-        // Enough space for "VimCrypt~".
-        let mut buf = vec![0u8; 9];
-        let mut file = fs::File::open(&path)?;
-        file.read(&mut buf)?;
-        if buf == b"VimCrypt~" {
-            file.seek(SeekFrom::Start(0))?;
-            let mut file_contents = Vec::new();
-            file.read_to_end(&mut file_contents)?;
-            let content = vimdecrypt::decrypt(&file_contents, pw)?;
-            report_txt_file_with_content(
-                path,
-                TextFileLineItemKind::VimEncrypted(pw.to_string()),
-                BufReader::new(Cursor::new(content)),
-                tx,
-            )?;
-            return Ok(());
+    let kind = match password {
+        None => TextFileLineItemKind::Plain,
+        Some(pw) => {
+            // Enough space for "VimCrypt~".
+            let mut buf = vec![0u8; 9];
+            let mut file = fs::File::open(&path)?;
+            file.read(&mut buf)?;
+            if buf == b"VimCrypt~" {
+                TextFileLineItemKind::VimEncrypted(pw.to_string())
+            } else {
+                TextFileLineItemKind::Plain
+            }
         }
-    }
-    let reader = BufReader::new(fs::File::open(&path)?);
-    report_txt_file_with_content(path, TextFileLineItemKind::Plain, reader, tx)
+    };
+
+    let reader: Box<dyn BufRead> = match kind {
+        TextFileLineItemKind::Plain => Box::new(BufReader::new(fs::File::open(&path)?)),
+        TextFileLineItemKind::VimEncrypted(ref pw) => {
+            let file_contents = std::fs::read(&path)?;
+            let content = vimdecrypt::decrypt(&file_contents, pw)?;
+            Box::new(BufReader::new(Cursor::new(content)))
+        }
+    };
+    report_txt_file_with_content(list_mode, path, kind, reader, tx)?;
+    Ok(())
 }
 
 fn report_any_file(path: PathBuf, tx: mpsc::Sender<Box<dyn Item>>) -> Result<()> {
@@ -218,7 +240,8 @@ fn report_any_file(path: PathBuf, tx: mpsc::Sender<Box<dyn Item>>) -> Result<()>
     Ok(())
 }
 
-fn handle_dir(
+fn handle_dir<'a>(
+    list_mode: ListMode,
     scope: &Scope<'a>,
     path: impl AsRef<Path>,
     password: &'a Option<String>,
@@ -232,9 +255,10 @@ fn handle_dir(
         let tx_clone = tx.clone();
         scope.execute(move || {
             match path.extension().and_then(OsStr::to_str) {
-                Some("md") | Some("txt") => report_txt_file(path, password, tx_clone),
+                Some("md") | Some("txt") => report_txt_file(list_mode, path, password, tx_clone),
                 _ => report_any_file(path, tx_clone),
-            }.unwrap()
+            }
+            .unwrap()
         });
     }
     Ok(())
@@ -301,6 +325,12 @@ enum Exit {
     Cat,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum ListMode {
+    FileName,
+    FileContent,
+}
+
 fn main() -> Result<()> {
     let args = CommandLineArguments::from_args();
 
@@ -319,16 +349,22 @@ fn main() -> Result<()> {
         None
     };
 
+    let list_mode = if args.files {
+        ListMode::FileName
+    } else {
+        ListMode::FileContent
+    };
+
     let (tx, rx) = mpsc::channel();
 
-    let pool = Pool::new(10);
+    let pool = Pool::new(2);
     pool.scoped(|scope| {
         for dir in configuration_file.reading_directories {
             let tx_clone = tx.clone();
             let pass_ref = &pass;
             scope.recurse(move |scope| {
                 let full_directory = shellexpand::tilde(&dir);
-                handle_dir(scope, &*full_directory, pass_ref, tx_clone).unwrap();
+                handle_dir(list_mode, scope, &*full_directory, pass_ref, tx_clone).unwrap();
             });
         }
         drop(tx);
@@ -372,7 +408,8 @@ fn main() -> Result<()> {
                 Exit::Show => show_path(&selected_item.path()),
                 Exit::Open => selected_item.open(),
                 Exit::Cat => selected_item.cat(),
-            }.unwrap()
+            }
+            .unwrap()
         });
     });
 
@@ -397,9 +434,12 @@ mod tests {
         tx.send(Box::new(TextFileLineItem {
             path: PathBuf::from("/tmp/blub.txt"),
             kind: TextFileLineItemKind::Plain,
-            line: "foo bar".into(),
-            line_index: 10,
-        }) as Box<dyn Item>).unwrap();
+            line: Some(Line {
+                line: "foo bar".into(),
+                line_index: 10,
+            }),
+        }) as Box<dyn Item>)
+            .unwrap();
 
         let mut buf = vec![0u8; 256];
         assert_eq!(25, adaptor.read(&mut buf).unwrap());
@@ -408,9 +448,12 @@ mod tests {
         tx.send(Box::new(TextFileLineItem {
             path: PathBuf::from("/tmp/blub1.txt"),
             kind: TextFileLineItemKind::Plain,
-            line: "foo bar blub".into(),
-            line_index: 10,
-        }) as Box<dyn Item>).unwrap();
+            line: Some(Line {
+                line: "foo bar blub".into(),
+                line_index: 10,
+            }),
+        }) as Box<dyn Item>)
+            .unwrap();
         drop(tx);
 
         assert_eq!(31, adaptor.read(&mut buf).unwrap());

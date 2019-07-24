@@ -7,17 +7,14 @@ return {
    {
       should_run = is_rust,
       redirect_stderr = "/tmp/cargo.err",
-      environment = {
-         CARGO_INCREMENTAL = 1,
-      },
       commands = {
          {
-            name = "Running cargo test",
-            command = "cargo +nightly test --all --release --color=always",
+            name = "Running cargo check",
+            command = "cargo check --all --color=always",
          },
          {
             name = "Running cargo build",
-            command = "cargo +nightly build --all --release --color=always",
+            command = "cargo build --release --all --color=always",
          },
       }
    },
