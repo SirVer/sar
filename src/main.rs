@@ -2,7 +2,7 @@ use failure::Error;
 use scoped_pool::{Pool, Scope};
 use self_update::cargo_crate_version;
 use serde_derive::Deserialize;
-use skim::{Skim, SkimOptions};
+use skim::{Skim, SkimOptionsBuilder};
 use std::collections::VecDeque;
 use std::default::Default;
 use std::ffi::OsStr;
@@ -357,7 +357,7 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
 
-    let pool = Pool::new(2);
+    let pool = Pool::new(10);
     pool.scoped(|scope| {
         for dir in configuration_file.reading_directories {
             let tx_clone = tx.clone();
@@ -379,9 +379,11 @@ fn main() -> Result<()> {
                 buffer: VecDeque::new(),
             };
 
-            let options: SkimOptions<'_> = SkimOptions::default()
+            let options = SkimOptionsBuilder::default()
                 .multi(false)
-                .expect("ctrl-n,ctrl-s,ctrl-o".to_string());
+                .expect(Some("ctrl-n,ctrl-s,ctrl-o".to_string()))
+                .build()
+                .expect("Could not build SkimOptions");
 
             let skim_output =
                 match Skim::run_with(&options, Some(Box::new(BufReader::new(adaptor)))) {
