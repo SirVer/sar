@@ -381,6 +381,7 @@ fn main() -> Result<()> {
 
             let options = SkimOptionsBuilder::default()
                 .multi(false)
+                .tabstop(Some("8"))
                 .expect(Some("ctrl-n,ctrl-s,ctrl-o".to_string()))
                 .build()
                 .expect("Could not build SkimOptions");

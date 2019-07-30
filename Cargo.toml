@@ -2,7 +2,7 @@
 authors = ["Holger Rapp <HolgerRapp@gmx.net>"]
 edition = "2018"
 name = "sar"
-version = "0.2.0"
+version = "0.2.1"
 
 [dependencies]
 default-editor = "0.1.0"
