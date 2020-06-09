@@ -2,13 +2,13 @@
 authors = ["Holger Rapp <HolgerRapp@gmx.net>"]
 edition = "2018"
 name = "sar"
-version = "0.2.4"
+version = "0.2.6"
 
 [dependencies]
 default-editor = "0.1.0"
 dirs = "1.0.2"
 failure = "0.1.1"
-rpassword = "2.0.0"
+rpassword = "4.0.5"
 scoped-pool = "1.0.0"
 self_update = "0.4.3"
 serde = "1.0.71"
@@ -17,5 +17,5 @@ shellexpand = "1.0.0"
 skim = "0.6.8"
 structopt = "0.2.0"
 toml = "0.4.6"
-vimdecrypt = "0.1.1"
+vimdecrypt = "0.1.3"
 walkdir = "2.1.4"
