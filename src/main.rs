@@ -142,7 +142,7 @@ fn call_editor(path: &Path, line_index: Option<usize>) -> Result<()> {
         args.push(format!("+{}", idx));
     }
     // We ignore errors from vim.
-    let _ = Command::new(cmd).args(&args).spawn()?.wait();
+    let _ = Command::new(cmd).args(&args).spawn()?;
     Ok(())
 }
 
