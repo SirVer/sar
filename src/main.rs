@@ -301,8 +301,8 @@ impl std::io::Read for SkimAdaptor {
 }
 
 fn update() -> Result<()> {
-    let target = self_update::get_target()?;
-    self_update::backends::github::Update::configure()?
+    let target = self_update::get_target();
+    self_update::backends::github::Update::configure()
         .repo_owner("SirVer")
         .repo_name("sar")
         .target(&target)
